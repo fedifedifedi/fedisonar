@@ -6,7 +6,7 @@ Usage :
     python fedisonar.py video.mp4                # video reelle
     python fedisonar.py <nom_du_clip>            # clip CFC : images data/channel/<nom_du_clip>_N.jpg
     python fedisonar.py --demo                   # genere une video synthetique de test
-    option --fond median                         # fond = mediane du clip au lieu de MOG2
+    option --fond mog2                           # fond appris au fil de l'eau au lieu de la mediane du clip
 Sorties : <nom>_annotee.mp4 (boites + trajectoires + compteurs) et <nom>_pistes.csv
           (dans outputs/ pour un clip CFC)
 """
@@ -97,7 +97,7 @@ def load_gray(video):
     return [cv2.imread(str(p), cv2.IMREAD_GRAYSCALE) for p in files], 8, Path("outputs") / video
 
 
-def candidates(grays, bg="mog2", var_threshold=40, diff_threshold=20):
+def candidates(grays, bg="median", var_threshold=40, diff_threshold=30):
     """Taches en mouvement de chaque image : liste de (cx, cy, boite, aire), AVANT le filtre d'aire.
     C'est l'etape couteuse ; la separer permet de la calculer une seule fois pendant le reglage.
     bg="mog2"   : fond appris au fil des images (marcherait en direct), 20 images d'apprentissage.
@@ -129,18 +129,22 @@ def candidates(grays, bg="mog2", var_threshold=40, diff_threshold=20):
     return result
 
 
-def count(cands, w, h, min_area=0.0014, min_len=10, min_dx=0.37):
-    """Suivi puis comptage. Seuils RELATIFS a la taille de l'image, car les clips vont de 216x485
-    a 707x1098 px : min_area = fraction de la surface de l'image, min_dx = fraction de sa largeur.
-    Renvoie (toutes les pistes, pistes comptees)."""
+def count(cands, w, h, min_area=125, min_len=10, min_dx=0.02):
+    """Suivi puis comptage. Valeurs par defaut reglees sur le groupe de reglage CFC (tune.py).
+    min_area en PIXELS : toutes les strates CFC ont ~137 px/m, un poisson y a donc la meme taille
+    en pixels, que l'image fasse 216x485 ou 707x1098 (une aire relative a l'image faisait pire).
+    min_dx en fraction de la LARGEUR : un poisson doit traverser une part du champ, quelle que
+    soit sa largeur. Renvoie (toutes les pistes, pistes comptees)."""
     trk = Tracker()
     for k, frame_cands in enumerate(cands):
-        trk.update([(cx, cy, box) for cx, cy, box, area in frame_cands if area >= min_area * w * h], k)
+        trk.update([(cx, cy, box) for cx, cy, box, area in frame_cands if area >= min_area], k)
     tracks = trk.all()
-    # une piste compte si elle dure assez et traverse vraiment le champ
-    counted = [t for t in tracks
-               if len(t["pts"]) >= min_len and abs(t["pts"][-1][0] - t["pts"][0][0]) >= min_dx * w]
-    return tracks, counted
+    return tracks, [t for t in tracks if is_counted(t, w, min_len, min_dx)]
+
+
+def is_counted(t, w, min_len, min_dx):
+    """Une piste compte si elle dure assez et traverse vraiment le champ (min_dx : fraction de la largeur w)."""
+    return len(t["pts"]) >= min_len and abs(t["pts"][-1][0] - t["pts"][0][0]) >= min_dx * w
 
 
 def going_right(t):
@@ -170,7 +174,7 @@ def write_video(grays, tracks, counted, path, fps):
     out.release()
 
 
-def run(video, min_area=0.0014, min_len=10, min_dx=0.37, bg="mog2", save=True):
+def run(video, min_area=125, min_len=10, min_dx=0.02, bg="median", save=True):
     # save=False : compte seulement, sans ecrire video ni CSV (evaluation rapide sur beaucoup de clips)
     grays, fps, stem = load_gray(video)
     h, w = grays[0].shape
@@ -196,8 +200,8 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("video", nargs="?")
     p.add_argument("--demo", action="store_true", help="genere et traite une video synthetique")
-    p.add_argument("--min-area", type=float, default=0.0014, help="aire minimale, en fraction de l'image")
-    p.add_argument("--fond", choices=["mog2", "median"], default="mog2", help="methode de fond")
+    p.add_argument("--min-area", type=int, default=125, help="aire minimale d'une tache, en pixels")
+    p.add_argument("--fond", choices=["mog2", "median"], default="median", help="methode de fond")
     a = p.parse_args()
     if a.demo:
         path, truth = make_demo()
