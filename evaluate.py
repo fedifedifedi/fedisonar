@@ -4,10 +4,11 @@ Evaluation du comptage de fedisonar.py sur des clips CFC (Kenai channel) annotes
 Usage :
     python evaluate.py                   # les 69 clips
     python evaluate.py <clip> <clip>     # seulement ces clips
+    python evaluate.py --groupe test     # groupe de test (ou --groupe reglage), voir split()
 Pour chaque clip : poissons annotes / comptes / erreur, puis l'erreur absolue totale
 et l'erreur relative (erreur absolue totale / nombre total de poissons annotes).
 """
-import argparse, json
+import argparse, json, random
 from pathlib import Path
 from fedisonar import run
 
@@ -18,6 +19,16 @@ METADATA = Path("data/metadata/kenai-channel.json")
 def all_clips():
     """Noms des 69 clips, tries pour avoir toujours le meme ordre."""
     return sorted(m["clip_name"] for m in json.loads(METADATA.read_text()))
+
+
+def split(seed=0):
+    """Deux groupes fixes : 1/3 des clips pour REGLER les parametres, 2/3 pour TESTER.
+    Graine fixe -> toujours le meme decoupage. Le groupe de test ne sert jamais au reglage,
+    sinon on mesurerait la capacite a coller a ces clips, pas a generaliser."""
+    clips = all_clips()
+    random.Random(seed).shuffle(clips)
+    n_tune = len(clips) // 3                                   # 69 clips -> 23 reglage, 46 test
+    return sorted(clips[:n_tune]), sorted(clips[n_tune:])
 
 
 def annotated_count(clip):
@@ -48,5 +59,10 @@ def evaluate(clips, verbose=True, **params):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("clips", nargs="*", help="noms de clips (par defaut : les 69)")
+    p.add_argument("--groupe", choices=["reglage", "test"], help="evalue seulement ce groupe")
     a = p.parse_args()
-    evaluate(a.clips or all_clips())
+    if a.groupe:
+        tune, test = split()
+        evaluate(tune if a.groupe == "reglage" else test)
+    else:
+        evaluate(a.clips or all_clips())
