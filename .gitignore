@@ -1,0 +1,12 @@
+# Environnement Python
+.venv/
+__pycache__/
+
+# Vidéos et sorties générées (lourdes, recréables avec --demo)
+*.mp4
+*_pistes.csv
+
+# Données (Caltech Fish Counting, etc.)
+data/
+*.tar
+*.tar.gz
