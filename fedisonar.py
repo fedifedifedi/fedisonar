@@ -81,7 +81,8 @@ def video_frames(cap):
         yield frame
 
 
-def run(video, min_area=150, min_len=10, min_dx=80):
+def run(video, min_area=150, min_len=10, min_dx=80, save=True):
+    # save=False : compte seulement, sans ecrire video ni CSV (evaluation rapide sur beaucoup de clips)
     cap = None
     if Path(video).is_file():                                                         # fichier video
         cap = cv2.VideoCapture(video)
@@ -100,7 +101,7 @@ def run(video, min_area=150, min_len=10, min_dx=80):
         Path("outputs").mkdir(exist_ok=True)
         stem = Path("outputs") / video
         frames = (cv2.imread(str(p)) for p in files)                                  # lues une par une, pas toutes en memoire
-    out = cv2.VideoWriter(f"{stem}_annotee.mp4", cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    out = cv2.VideoWriter(f"{stem}_annotee.mp4", cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h)) if save else None
     bg = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=40, detectShadows=False)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     trk, k = Tracker(), 0
@@ -120,6 +121,9 @@ def run(video, min_area=150, min_len=10, min_dx=80):
                     x, y, bw, bh = cv2.boundingRect(c)
                     dets.append((x + bw / 2, y + bh / 2, (x, y, bw, bh)))
         trk.update(dets, k)
+        k += 1
+        if not save:
+            continue
         for tr in trk.tracks.values():
             if tr["missed"] == 0:
                 x, y, bw, bh = tr["box"]
@@ -129,12 +133,14 @@ def run(video, min_area=150, min_len=10, min_dx=80):
         v = [t for t in trk.all() if valid(t)]
         lr = sum(t["pts"][-1][0] > t["pts"][0][0] for t in v)
         cv2.putText(frame, f"G->D: {lr}   D->G: {len(v) - lr}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        out.write(frame); k += 1
+        out.write(frame)
     if cap:
         cap.release()
-    out.release()
 
     v = [t for t in trk.all() if valid(t)]
+    if not save:
+        return len(v)
+    out.release()
     with open(f"{stem}_pistes.csv", "w", newline="") as f:
         wr = csv.writer(f)
         wr.writerow(["id", "frame_debut", "frame_fin", "duree_s", "sens", "largeur_derniere_boite_px"])
