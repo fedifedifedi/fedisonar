@@ -3,9 +3,11 @@ FediSonar - prototype de Fedi Limem : detection, suivi et comptage d'objets en m
 Approche classique (sans entrainement) servant de baseline avant un modele deep learning.
 
 Usage :
-    python fedisonar.py video.mp4                # video reelle (ex. clip du Caltech Fish Counting)
+    python fedisonar.py video.mp4                # video reelle
+    python fedisonar.py <nom_du_clip>            # clip CFC : images data/channel/<nom_du_clip>_N.jpg
     python fedisonar.py --demo                   # genere une video synthetique de test
 Sorties : <nom>_annotee.mp4 (boites + trajectoires + compteurs) et <nom>_pistes.csv
+          (dans outputs/ pour un clip CFC)
 """
 import argparse, csv, sys
 from pathlib import Path
@@ -64,13 +66,40 @@ class Tracker:
         return self.done + list(self.tracks.values())
 
 
+def clip_files(name, folder="data/channel"):
+    """Images d'un clip CFC (<nom>_N.jpg), triees par N en NUMERIQUE : sinon _10 passerait avant _2."""
+    files = [p for p in Path(folder).glob(f"{name}_*.jpg") if p.stem.rsplit("_", 1)[0] == name]
+    return sorted(files, key=lambda p: int(p.stem.rsplit("_", 1)[1]))
+
+
+def video_frames(cap):
+    """Lit une video image par image, pour la traiter comme une liste d'images."""
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            return
+        yield frame
+
+
 def run(video, min_area=150, min_len=10, min_dx=80):
-    cap = cv2.VideoCapture(video)
-    if not cap.isOpened():
-        sys.exit(f"Impossible d'ouvrir {video}")
-    w, h = int(cap.get(3)), int(cap.get(4))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 15
-    stem = Path(video).with_suffix("")
+    cap = None
+    if Path(video).is_file():                                                         # fichier video
+        cap = cv2.VideoCapture(video)
+        if not cap.isOpened():
+            sys.exit(f"Impossible d'ouvrir {video}")
+        w, h = int(cap.get(3)), int(cap.get(4))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 15
+        stem = Path(video).with_suffix("")
+        frames = video_frames(cap)
+    else:                                                                             # sinon : nom d'un clip CFC
+        files = clip_files(video)
+        if not files:
+            sys.exit(f"Ni video ni clip trouve pour {video}")
+        h, w = cv2.imread(str(files[0])).shape[:2]
+        fps = 8                                                                       # CFC channel : 8 images/s (metadonnees)
+        Path("outputs").mkdir(exist_ok=True)
+        stem = Path("outputs") / video
+        frames = (cv2.imread(str(p)) for p in files)                                  # lues une par une, pas toutes en memoire
     out = cv2.VideoWriter(f"{stem}_annotee.mp4", cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
     bg = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=40, detectShadows=False)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -79,10 +108,7 @@ def run(video, min_area=150, min_len=10, min_dx=80):
     def valid(tr):  # une piste compte si elle dure assez et traverse vraiment le champ
         return len(tr["pts"]) >= min_len and abs(tr["pts"][-1][0] - tr["pts"][0][0]) >= min_dx
 
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
+    for frame in frames:
         gray = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (7, 7), 0)   # attenue le speckle
         mask = bg.apply(gray)                                                         # fond appris -> objets mobiles
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
@@ -104,7 +130,9 @@ def run(video, min_area=150, min_len=10, min_dx=80):
         lr = sum(t["pts"][-1][0] > t["pts"][0][0] for t in v)
         cv2.putText(frame, f"G->D: {lr}   D->G: {len(v) - lr}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         out.write(frame); k += 1
-    cap.release(); out.release()
+    if cap:
+        cap.release()
+    out.release()
 
     v = [t for t in trk.all() if valid(t)]
     with open(f"{stem}_pistes.csv", "w", newline="") as f:
