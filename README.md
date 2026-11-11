@@ -4,10 +4,10 @@ Détection, suivi et comptage de poissons dans des vidéos de sonar imageur, par
 **classique** (OpenCV + NumPy, sans apprentissage), évaluée sur le
 [Caltech Fish Counting Dataset](https://github.com/visipedia/caltech-fish-counting).
 
-[![Aperçu : clip de test en strate 3, pistes comptées en vert, rejetées en rouge](docs/apercu_strate3.png)](docs/demo_strate3_20s.mp4)
+[![Démo animée : clip de test en strate 3, pistes comptées en vert, rejetées en rouge](docs/demo_fedisonar.gif)](docs/demo_strate3_20s.mp4)
 
-*Clip de test, strate 3 (20 s, [vidéo](docs/demo_strate3_20s.mp4)) : 9 poissons annotés,
-8 comptés. Vert = piste comptée, rouge = piste rejetée, jaune = trajectoire,
+*Extrait de 8 s d'un clip de test, strate 3 ([vidéo complète, 20 s](docs/demo_strate3_20s.mp4)) :
+9 poissons annotés, 8 comptés sur le clip. Vert = piste comptée, rouge = piste rejetée, jaune = trajectoire,
 compteurs par sens en haut à gauche.*
 
 ## Objectif
