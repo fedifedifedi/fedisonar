@@ -4,6 +4,7 @@ __pycache__/
 
 # Vidéos et sorties générées (lourdes, recréables avec --demo)
 *.mp4
+!docs/*.mp4
 *_pistes.csv
 outputs/
 
