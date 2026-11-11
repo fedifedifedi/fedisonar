@@ -6,6 +6,7 @@ Usage :
     python fedisonar.py video.mp4                # video reelle
     python fedisonar.py <nom_du_clip>            # clip CFC : images data/channel/<nom_du_clip>_N.jpg
     python fedisonar.py --demo                   # genere une video synthetique de test
+    option --fond median                         # fond = mediane du clip au lieu de MOG2
 Sorties : <nom>_annotee.mp4 (boites + trajectoires + compteurs) et <nom>_pistes.csv
           (dans outputs/ pour un clip CFC)
 """
@@ -55,11 +56,12 @@ class Tracker:
                     self.done.append(self.tracks.pop(tid))
             else:
                 free.discard(best)
-                tr["pts"].append(dets[best][:2]); tr["box"] = dets[best][2]
-                tr["last"] = frame_idx; tr["missed"] = 0
+                tr["pts"].append(dets[best][:2]); tr["boxes"].append(dets[best][2])
+                tr["frames"].append(frame_idx); tr["missed"] = 0
         for i in free:
-            self.tracks[self.next_id] = dict(id=self.next_id, pts=[dets[i][:2]], box=dets[i][2],
-                                             first=frame_idx, last=frame_idx, missed=0)
+            # historique complet (position, boite, numero d'image) : sert a dessiner la video apres coup
+            self.tracks[self.next_id] = dict(id=self.next_id, pts=[dets[i][:2]], boxes=[dets[i][2]],
+                                             frames=[frame_idx], missed=0)
             self.next_id += 1
 
     def all(self):
@@ -72,98 +74,136 @@ def clip_files(name, folder="data/channel"):
     return sorted(files, key=lambda p: int(p.stem.rsplit("_", 1)[1]))
 
 
-def video_frames(cap):
-    """Lit une video image par image, pour la traiter comme une liste d'images."""
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            return
-        yield frame
-
-
-def run(video, min_area=150, min_len=10, min_dx=80, save=True):
-    # save=False : compte seulement, sans ecrire video ni CSV (evaluation rapide sur beaucoup de clips)
-    cap = None
+def load_gray(video):
+    """Toutes les images (video ou clip CFC) en niveaux de gris, la cadence et le prefixe des sorties.
+    Tout est garde en memoire : le fond median a besoin du clip entier (200 images, 150 Mo au plus)."""
     if Path(video).is_file():                                                         # fichier video
         cap = cv2.VideoCapture(video)
         if not cap.isOpened():
             sys.exit(f"Impossible d'ouvrir {video}")
-        w, h = int(cap.get(3)), int(cap.get(4))
         fps = cap.get(cv2.CAP_PROP_FPS) or 15
-        stem = Path(video).with_suffix("")
-        frames = video_frames(cap)
-    else:                                                                             # sinon : nom d'un clip CFC
-        files = clip_files(video)
-        if not files:
-            sys.exit(f"Ni video ni clip trouve pour {video}")
-        h, w = cv2.imread(str(files[0])).shape[:2]
-        fps = 8                                                                       # CFC channel : 8 images/s (metadonnees)
-        Path("outputs").mkdir(exist_ok=True)
-        stem = Path("outputs") / video
-        frames = (cv2.imread(str(p)) for p in files)                                  # lues une par une, pas toutes en memoire
-    out = cv2.VideoWriter(f"{stem}_annotee.mp4", cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h)) if save else None
-    bg = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=40, detectShadows=False)
+        grays = []
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            grays.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        cap.release()
+        return grays, fps, Path(video).with_suffix("")
+    files = clip_files(video)                                                         # sinon : nom d'un clip CFC
+    if not files:
+        sys.exit(f"Ni video ni clip trouve pour {video}")
+    # CFC channel : 8 images/s (metadonnees) ; les JPG bruts sont deja en niveaux de gris
+    return [cv2.imread(str(p), cv2.IMREAD_GRAYSCALE) for p in files], 8, Path("outputs") / video
+
+
+def candidates(grays, bg="mog2", var_threshold=40, diff_threshold=20):
+    """Taches en mouvement de chaque image : liste de (cx, cy, boite, aire), AVANT le filtre d'aire.
+    C'est l'etape couteuse ; la separer permet de la calculer une seule fois pendant le reglage.
+    bg="mog2"   : fond appris au fil des images (marcherait en direct), 20 images d'apprentissage.
+    bg="median" : fond = mediane de toutes les images du clip. Possible car le clip est enregistre :
+                  un poisson ne reste pas au meme endroit la plupart du temps, donc la mediane
+                  donne le fond sans poisson, et on detecte des la premiere image."""
+    blurred = [cv2.GaussianBlur(g, (7, 7), 0) for g in grays]                        # attenue le speckle
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    trk, k = Tracker(), 0
-
-    def valid(tr):  # une piste compte si elle dure assez et traverse vraiment le champ
-        return len(tr["pts"]) >= min_len and abs(tr["pts"][-1][0] - tr["pts"][0][0]) >= min_dx
-
-    for frame in frames:
-        gray = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (7, 7), 0)   # attenue le speckle
-        mask = bg.apply(gray)                                                         # fond appris -> objets mobiles
+    if bg == "median":
+        background = np.median(np.stack(blurred), axis=0).astype(np.uint8)
+    else:
+        mog = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=var_threshold, detectShadows=False)
+    result = []
+    for k, g in enumerate(blurred):
+        if bg == "median":
+            # un poisson renvoie plus d'echo que le fond : on garde seulement ce qui est PLUS clair
+            # (cv2.subtract ramene a 0 les differences negatives)
+            mask = cv2.threshold(cv2.subtract(g, background), diff_threshold, 255, cv2.THRESH_BINARY)[1]
+        else:
+            mask = mog.apply(g)                                                       # fond appris -> objets mobiles
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        dets = []
-        if k > 20:                                                                    # laisse le fond se stabiliser
+        cands = []
+        if bg == "median" or k > 20:                                                  # MOG2 : laisse le fond se stabiliser
             for c in cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]:
-                if cv2.contourArea(c) >= min_area:
-                    x, y, bw, bh = cv2.boundingRect(c)
-                    dets.append((x + bw / 2, y + bh / 2, (x, y, bw, bh)))
-        trk.update(dets, k)
-        k += 1
-        if not save:
-            continue
-        for tr in trk.tracks.values():
-            if tr["missed"] == 0:
-                x, y, bw, bh = tr["box"]
-                cv2.rectangle(frame, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
-                cv2.putText(frame, f"#{tr['id']}", (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                cv2.polylines(frame, [np.int32(tr["pts"])], False, (0, 200, 255), 1)
-        v = [t for t in trk.all() if valid(t)]
-        lr = sum(t["pts"][-1][0] > t["pts"][0][0] for t in v)
-        cv2.putText(frame, f"G->D: {lr}   D->G: {len(v) - lr}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        out.write(frame)
-    if cap:
-        cap.release()
+                x, y, bw, bh = cv2.boundingRect(c)
+                cands.append((x + bw / 2, y + bh / 2, (x, y, bw, bh), cv2.contourArea(c)))
+        result.append(cands)
+    return result
 
-    v = [t for t in trk.all() if valid(t)]
-    if not save:
-        return len(v)
+
+def count(cands, w, h, min_area=0.0014, min_len=10, min_dx=0.37):
+    """Suivi puis comptage. Seuils RELATIFS a la taille de l'image, car les clips vont de 216x485
+    a 707x1098 px : min_area = fraction de la surface de l'image, min_dx = fraction de sa largeur.
+    Renvoie (toutes les pistes, pistes comptees)."""
+    trk = Tracker()
+    for k, frame_cands in enumerate(cands):
+        trk.update([(cx, cy, box) for cx, cy, box, area in frame_cands if area >= min_area * w * h], k)
+    tracks = trk.all()
+    # une piste compte si elle dure assez et traverse vraiment le champ
+    counted = [t for t in tracks
+               if len(t["pts"]) >= min_len and abs(t["pts"][-1][0] - t["pts"][0][0]) >= min_dx * w]
+    return tracks, counted
+
+
+def going_right(t):
+    return t["pts"][-1][0] > t["pts"][0][0]
+
+
+def write_video(grays, tracks, counted, path, fps):
+    """Video annotee, dessinee apres coup grace a l'historique des pistes.
+    Vert = piste comptee, rouge = piste rejetee (trop courte ou pas assez de deplacement)."""
+    h, w = grays[0].shape
+    out = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    counted_ids = {t["id"] for t in counted}
+    for k, g in enumerate(grays):
+        frame = cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
+        for t in tracks:
+            if k in t["frames"]:                                                      # piste detectee sur cette image
+                i = t["frames"].index(k)
+                x, y, bw, bh = t["boxes"][i]
+                color = (0, 255, 0) if t["id"] in counted_ids else (0, 0, 255)
+                cv2.rectangle(frame, (x, y), (x + bw, y + bh), color, 2)
+                cv2.putText(frame, f"#{t['id']}", (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                cv2.polylines(frame, [np.int32(t["pts"][:i + 1])], False, (0, 200, 255), 1)
+        done = [t for t in counted if t["frames"][-1] <= k]                           # compte quand la piste se termine
+        lr = sum(going_right(t) for t in done)
+        cv2.putText(frame, f"G->D: {lr}   D->G: {len(done) - lr}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        out.write(frame)
     out.release()
+
+
+def run(video, min_area=0.0014, min_len=10, min_dx=0.37, bg="mog2", save=True):
+    # save=False : compte seulement, sans ecrire video ni CSV (evaluation rapide sur beaucoup de clips)
+    grays, fps, stem = load_gray(video)
+    h, w = grays[0].shape
+    tracks, counted = count(candidates(grays, bg), w, h, min_area, min_len, min_dx)
+    if not save:
+        return len(counted)
+    stem.parent.mkdir(exist_ok=True)
+    write_video(grays, tracks, counted, f"{stem}_annotee.mp4", fps)
     with open(f"{stem}_pistes.csv", "w", newline="") as f:
         wr = csv.writer(f)
         wr.writerow(["id", "frame_debut", "frame_fin", "duree_s", "sens", "largeur_derniere_boite_px"])
-        for t in v:
-            sens = "gauche->droite" if t["pts"][-1][0] > t["pts"][0][0] else "droite->gauche"
-            wr.writerow([t["id"], t["first"], t["last"], round((t["last"] - t["first"]) / fps, 2), sens, t["box"][2]])
-    lr = sum(t["pts"][-1][0] > t["pts"][0][0] for t in v)
-    print(f"{k} frames | {len(v)} objets comptes (gauche->droite: {lr}, droite->gauche: {len(v) - lr})")
+        for t in counted:
+            first, last = t["frames"][0], t["frames"][-1]
+            sens = "gauche->droite" if going_right(t) else "droite->gauche"
+            wr.writerow([t["id"], first, last, round((last - first) / fps, 2), sens, t["boxes"][-1][2]])
+    lr = sum(going_right(t) for t in counted)
+    print(f"{len(grays)} frames | {len(counted)} objets comptes (gauche->droite: {lr}, droite->gauche: {len(counted) - lr})")
     print(f"Sorties : {stem}_annotee.mp4, {stem}_pistes.csv")
-    return len(v)
+    return len(counted)
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("video", nargs="?")
     p.add_argument("--demo", action="store_true", help="genere et traite une video synthetique")
-    p.add_argument("--min-area", type=int, default=150)
+    p.add_argument("--min-area", type=float, default=0.0014, help="aire minimale, en fraction de l'image")
+    p.add_argument("--fond", choices=["mog2", "median"], default="mog2", help="methode de fond")
     a = p.parse_args()
     if a.demo:
         path, truth = make_demo()
-        n = run(path, a.min_area)
+        n = run(path, a.min_area, bg=a.fond)
         print(f"Verite terrain de la demo : {truth} objets -> detectes : {n}")
     elif a.video:
-        run(a.video, a.min_area)
+        run(a.video, a.min_area, bg=a.fond)
     else:
         p.print_help()
